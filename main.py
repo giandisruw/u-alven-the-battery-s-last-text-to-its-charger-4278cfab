@@ -51,13 +51,53 @@ def validate(line: str) -> str:
     return line
 
 
-def main() -> None:
-    line = validate(ENTRY.strip())
-    outdir = output_dir()
+def write_entry(line: str, outdir: str) -> str:
+    """Write `line` to entry.txt atomically, then flush to disk.
+
+    Writes to a temp file in the same directory, flushes and fsyncs
+    it so the bytes are durable, then atomically renames it over
+    entry.txt and fsyncs the directory. Replaces the old direct
+    open/write, which could leave a torn file if the run was killed
+    mid-write. Returns the final path.
+    """
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, "entry.txt")
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(outdir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    return path
+
+
+def verify_written(path: str, expected: str) -> None:
+    """Read-back gate: entry.txt on disk must equal `expected` exactly.
+
+    Reads the file back as bytes and compares byte-for-byte against
+    the UTF-8 encoding of the expected line. Raises RuntimeError on
+    any mismatch (wrong size or content) instead of silently shipping
+    a truncated or corrupted entry to the grader.
+    """
+    with open(path, "rb") as f:
+        actual = f.read()
+    wanted = expected.encode("utf-8")
+    if actual != wanted:
+        raise RuntimeError(
+            f"verification failed: {path} is {len(actual)} bytes, "
+            f"expected {len(wanted)} bytes"
+        )
+
+
+def main() -> None:
+    line = validate(ENTRY.strip())
+    path = write_entry(line, output_dir())
+    verify_written(path, line)
     print(f"Wrote {len(line)} chars to {path}")
     print(line)
 
